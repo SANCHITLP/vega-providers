@@ -58,11 +58,19 @@ class DevServer {
     // Serve individual provider files
     this.app.get("/dist/:provider/:file", (req, res) => {
       const { provider, file } = req.params;
-      const filePath = path.join(this.distDir, provider, file);
+      let filePath = path.join(this.distDir, provider, file);
+
+      // Check if file exists, if not try adding .js extension
+      if (!fs.existsSync(filePath) && !filePath.endsWith(".js")) {
+        if (fs.existsSync(filePath + ".js")) {
+          filePath += ".js";
+        }
+      }
 
       if (fs.existsSync(filePath)) {
         res.sendFile(filePath);
       } else {
+        console.error(`File not found: ${filePath}`);
         res.status(404).json({
           error: `File not found: ${provider}/${file}`,
           hint: "Make sure to run build first",
@@ -136,7 +144,7 @@ class DevServer {
   }
 
   getBuildTime() {
-    const manifestPath = path.join(this.rootDir, "manifest.json");
+    const manifestPath = path.join(this.currentDir, "manifest.json");
     if (fs.existsSync(manifestPath)) {
       const stats = fs.statSync(manifestPath);
       return stats.mtime.toISOString();
@@ -183,4 +191,3 @@ class DevServer {
 // Start the server
 const server = new DevServer();
 server.start();
-

@@ -55,8 +55,8 @@ class DevServer {
       }
     });
 
-    // Serve individual provider files
-    this.app.get("/dist/:provider/:file", (req, res) => {
+    // Serve individual provider files as JSON (BACKEND FIX)
+    this.app.get("/dist/:provider/:file", async (req, res) => {
       const { provider, file } = req.params;
       let filePath = path.join(this.distDir, provider, file);
 
@@ -68,7 +68,24 @@ class DevServer {
       }
 
       if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
+        // If it's a JS file, require it and send as JSON
+        if (filePath.endsWith('.js')) {
+            try {
+                // Clear require cache to ensure fresh data if file changed
+                delete require.cache[require.resolve(filePath)];
+                const moduleData = require(filePath);
+                
+                // If it's the catalog file, we specifically might want the 'catalog' export
+                // But generally sending the whole export object is safer
+                res.json(moduleData);
+            } catch (err) {
+                console.error(`Error requiring file: ${filePath}`, err);
+                res.status(500).json({ error: "Failed to load module", details: err.message });
+            }
+        } else {
+            // Fallback for non-js files (e.g. source maps)
+            res.sendFile(filePath);
+        }
       } else {
         console.error(`File not found: ${filePath}`);
         res.status(404).json({
@@ -77,6 +94,101 @@ class DevServer {
         });
       }
     });
+    
+    // Dynamic Execution Route (Optional but recommended for robust API behavior)
+    // This allows calls like /netflixMirror/catalog or /netflixMirror/posts?page=1
+    this.app.get("/:provider/:functionName", async (req, res) => {
+        const { provider, functionName } = req.params;
+        
+        // Skip reserved routes
+        if (['manifest.json', 'dist', 'build', 'status', 'providers', 'health'].includes(provider)) {
+            return res.status(404).json({ error: "Not found" });
+        }
+
+        let filePath = path.join(this.distDir, provider, functionName + ".js");
+        
+        // Fallback for 'watch' -> 'stream.js'
+        if (!fs.existsSync(filePath)) {
+             if (functionName === 'watch') {
+                 filePath = path.join(this.distDir, provider, "stream.js");
+             } else {
+                 // If the file doesn't exist, maybe it's just missing
+                 return res.status(404).json({ error: `Function ${functionName} not found for ${provider}` });
+             }
+        }
+        
+        try {
+            delete require.cache[require.resolve(filePath)];
+            const module = require(filePath);
+            
+            // Get the exported function/object
+            // Priority: Named export matching filename > 'default' export > First export found
+            let func = module[functionName] || module.default || Object.values(module)[0];
+            
+            // Special handling for 'watch' mapping to 'stream' export
+            if (functionName === 'watch') {
+                func = module['stream'] || module.default;
+            }
+
+            if (typeof func !== 'function') {
+                // If it's data (like catalog array), return it directly
+                return res.json(func);
+            }
+            
+            // Mock Provider Context
+            const providerContext = {
+                url: "https://example.com", 
+                // Add any other context needed by your providers
+            };
+
+            let result;
+            if (functionName === 'posts') {
+                const page = req.query.page || 1;
+                const filter = req.query.filter || "";
+                result = await func(filter, page, providerContext);
+            } else if (functionName === 'search') {
+                const query = req.query.query || req.params.query;
+                const page = req.query.page || 1;
+                result = await func(query, page, providerContext);
+            } else if (functionName === 'stream' || functionName === 'watch') {
+                const id = req.query.id || req.query.link;
+                const type = req.query.type || "";
+                result = await func(id, type, providerContext);
+            } else if (functionName === 'catalog') {
+                result = await func(providerContext);
+            } else if (functionName === 'meta') {
+                const link = req.query.link;
+                result = await func(link, providerContext);
+            } else if (functionName === 'episodes') {
+                const link = req.query.url || req.query.link;
+                result = await func(link, providerContext);
+            } else {
+                 // Generic execution with context only
+                 result = await func(providerContext);
+            }
+            
+            res.json(result);
+
+        } catch (error) {
+            console.error(`Execution error for ${provider}/${functionName}:`, error);
+            res.status(500).json({ error: error.message, stack: error.stack });
+        }
+    });
+
+    // Handle search as path param: /:provider/search/:query
+    this.app.get("/:provider/search/:query", async (req, res) => {
+        // Forward logic to the main handler manually to avoid code duplication
+        // In a real app, I'd refactor the logic into a helper function.
+        // For now, let's just use the query param redirection if the client supports it,
+        // or implement minimal logic here.
+        req.query.query = req.params.query;
+        // ... (Logic would be repeated here, simpler to rely on the generic handler above if client uses ?query=)
+        // But since we added this route specifically:
+        const { provider, query } = req.params;
+        // ... implement search logic or redirect ...
+        res.redirect(`/${provider}/search?query=${encodeURIComponent(query)}`);
+    });
+
 
     // Build endpoint - trigger rebuild
     this.app.post("/build", (req, res) => {
@@ -123,6 +235,7 @@ class DevServer {
         availableEndpoints: [
           "GET /manifest.json",
           "GET /dist/:provider/:file",
+          "GET /:provider/:function (execute)",
           "POST /build",
           "GET /status",
           "GET /providers",
